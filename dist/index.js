@@ -134132,7 +134132,7 @@ var ConversationManager = class {
       this.persistedIds.add(id);
       handle.agent.inject(createUserMessage({
         content: [{ type: "text", text: this.config.systemPrompt }],
-        source: { kind: "plugin", plugin: "deepseek-harness-lark", form: "instructions" }
+        source: { kind: "plugin:deepseek-harness-lark", form: "instructions" }
       }));
       if (id.startsWith("lark-v1-task-")) this.pinFullAccess(handle);
       return handle;

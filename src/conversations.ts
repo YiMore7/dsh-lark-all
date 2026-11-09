@@ -605,7 +605,7 @@ export class ConversationManager {
       this.persistedIds.add(id)
       handle.agent.inject(createUserMessage({
         content: [{ type: 'text', text: this.config.systemPrompt }],
-        source: { kind: 'plugin', plugin: 'deepseek-harness-lark', form: 'instructions' },
+        source: { kind: 'plugin:deepseek-harness-lark', form: 'instructions' },
       }))
       // Feishu-raised tasks run with Full access by default: pin the
       // danger-full-access preset (sandbox + approval) on every fresh task
