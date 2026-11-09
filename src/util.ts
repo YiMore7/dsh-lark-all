@@ -6,12 +6,14 @@ export function sessionIdFor(
   accountId: string,
   message: Pick<NormalizedMessage, 'chatType' | 'chatId' | 'threadId'>,
   threadSessions = false,
+  generation = 0,
 ): string {
   const scope = message.chatType === 'group' ? 'group' : 'single'
   const thread = threadSessions && message.threadId ? `\0${message.threadId}` : ''
   if (message.chatId.length === 0) throw new Error(`Lark ${scope} message has no chat identifier`)
+  const genSuffix = generation > 0 ? `\0gen${generation}` : ''
   const digest = createHash('sha256')
-    .update(`${accountId}\0${scope}\0${message.chatId}${thread}`)
+    .update(`${accountId}\0${scope}\0${message.chatId}${thread}${genSuffix}`)
     .digest('hex')
     .slice(0, 32)
   return `lark-v1-${scope}-${digest}`

@@ -146,7 +146,7 @@ export class ConversationManager {
 
   /** Process one inbound message after earlier work in the same Lark conversation. */
   process(message: NormalizedMessage, channel: LarkChannelPort): Promise<ConversationReply> {
-    const id = sessionIdFor(this.config.accountId || this.config.appId, message)
+    const id = this.mainSessionIdFor(message)
     // Preempt any busy agent BEFORE queueing: a previous message whose turn
     // is stuck (e.g. waiting on a Web-only question) holds this serial queue
     // via its `whenIdle`, so this message would wait behind it indefinitely.
@@ -197,7 +197,7 @@ export class ConversationManager {
 
   /** Cancel active work for one Lark conversation or task thread. */
   cancel(message: NormalizedMessage): boolean {
-    const id = this.taskIdFor(message) ?? sessionIdFor(this.config.accountId || this.config.appId, message)
+    const id = this.taskIdFor(message) ?? this.mainSessionIdFor(message)
     const agent = this.handles.get(id)?.agent ?? this.ctx.agents.get(SessionId(id))
     if (agent === undefined || agent.status === 'idle') return false
     agent.cancel({ kind: 'user' })
@@ -273,6 +273,28 @@ export class ConversationManager {
     const handle = await this.getOrCreate(taskId, preset)
     this.assignTaskSeq(taskId)
     const agent = handle.agent
+
+    // Automatically name task session in Web UI using the initial task prompt
+    const currentTurns = this.taskTurns.get(taskId) ?? 0
+    if (currentTurns === 0) {
+      const rawTitle = (taskContent || message.content || '任务').trim().replace(/[\r\n\t]+/g, ' ')
+      const title = rawTitle.slice(0, 24) || '飞书任务'
+      try {
+        const sessionTitle = this.ctx.get('sessionTitle') as { rename?(session: Session, title: string): void } | undefined
+        if (sessionTitle?.rename) {
+          sessionTitle.rename(agent.session, title)
+        } else {
+          (agent.session as any).append('session/title', {
+            title,
+            messageSeqs: [],
+            source: { kind: 'user' },
+          })
+        }
+      } catch (error) {
+        this.log.warn('Failed to set task session title (%s): %s', taskId, String(error))
+      }
+    }
+
     const start = getSessionEventCount(agent.session)
     const includeImages = await this.includeImages(agent)
     const content = await inboundContent(
@@ -605,12 +627,10 @@ export class ConversationManager {
       this.persistedIds.add(id)
       handle.agent.inject(createUserMessage({
         content: [{ type: 'text', text: this.config.systemPrompt }],
-        source: { kind: 'plugin:deepseek-harness-lark', form: 'instructions' },
+        source: { kind: 'plugin:deepseek-harness-lark' as any, form: 'instructions' },
       }))
-      // Feishu-raised tasks run with Full access by default: pin the
-      // danger-full-access preset (sandbox + approval) on every fresh task
-      // session, independent of the deployment-wide default.
-      if (id.startsWith('lark-v1-task-')) this.pinFullAccess(handle)
+      // Feishu-raised tasks full access pin is guarded by taskFullAccess config
+      if (id.startsWith('lark-v1-task-') && this.config.taskFullAccess) this.pinFullAccess(handle)
       return handle
     } catch (error) {
       if (String(error).includes('already exists')) {
@@ -636,6 +656,7 @@ export class ConversationManager {
    * switch only logs a warning; the task itself still runs.
    */
   private pinFullAccess(handle: AgentHandle): void {
+    if (!this.config.taskFullAccess) return
     const presets = this.ctx.get('permissionPresets') as
       | { set(session: Session, name: string): void }
       | undefined
@@ -669,8 +690,14 @@ export class ConversationManager {
     }
 
     const finalTurn = [...events].reverse().find(event => event.type === 'turn/end')
-    if (texts.length === 0 && finalTurn?.type === 'turn/end' && finalTurn.data.reason.kind === 'error') {
-      return { text: `处理失败（${finalTurn.data.reason.error.code}），请稍后重试。`, images }
+    if (finalTurn?.type === 'turn/end' && finalTurn.data.reason.kind === 'error') {
+      const err = finalTurn.data.reason.error
+      const errDetail = typeof err === 'object' ? JSON.stringify(err) : String(err)
+      this.log.error('Turn error occurred: %s', errDetail)
+      console.error(`[dsh-lark] Turn error: ${errDetail}`)
+      if (texts.length === 0) {
+        return { text: `处理失败（${err.code}）：${err.message || '请稍后重试。'}`, images }
+      }
     }
     if (texts.length === 0 && images.length === 0) {
       return { text: '处理完成，但没有生成可发送的内容。', images }
@@ -718,21 +745,74 @@ export class ConversationManager {
     this.taskSeq.set(taskId, { date, seq: counter.seq })
   }
 
-  private loadTaskCounter(): { date: string; seq: number; tasks: Record<string, { date: string; seq: number }> } {
+  /** Retrieve current generation number for one chat (default 0). */
+  getChatGeneration(chatId: string): number {
+    return this.loadTaskCounter().generations?.[chatId] ?? 0
+  }
+
+  /** Reset chat context by bumping generation, returning new generation number. */
+  resetChatGeneration(chatId: string): number {
+    const counter = this.loadTaskCounter()
+    const generations = counter.generations ?? {}
+    const current = generations[chatId] ?? 0
+    const next = current + 1
+    generations[chatId] = next
+    counter.generations = generations
+    this.saveTaskCounter(counter)
+    return next
+  }
+
+  /** Deterministic main-chat session id considering generation resets. */
+  mainSessionIdFor(message: NormalizedMessage): string {
+    const gen = this.getChatGeneration(message.chatId)
+    return sessionIdFor(this.config.accountId || this.config.appId, message, false, gen)
+  }
+
+  /** Formatted summary of active/registered task sessions for /tasks command. */
+  getActiveTasksSummary(): string {
+    if (this.taskTurns.size === 0) {
+      return '当前暂无运行中的任务话题。在主聊天中发送「任务：...」即可创建独立任务话题。'
+    }
+    const lines = ['当前任务话题列表：']
+    for (const [taskId, turns] of this.taskTurns.entries()) {
+      const mode = this.taskModes.get(taskId) ?? '默认'
+      const seq = this.taskSeq.get(taskId)
+      const prefix = seq ? `[${seq.date}-任务-${seq.seq}]` : `[${taskId.slice(-8)}]`
+      lines.push(`• ${prefix}: 模式=${mode}, 已完成 ${turns} 轮对话 (id: ${taskId})`)
+    }
+    return lines.join('\n')
+  }
+
+  private loadTaskCounter(): {
+    date: string
+    seq: number
+    tasks: Record<string, { date: string; seq: number }>
+    generations?: Record<string, number>
+  } {
     try {
       const file = this.config.taskCounterFile || join(this.config.cwd, '.lark-task-counter.json')
       const raw = readFileSync(file, 'utf8')
       const parsed = JSON.parse(raw)
       if (parsed && typeof parsed === 'object' && typeof parsed.date === 'string' && typeof parsed.seq === 'number') {
-        return { date: parsed.date, seq: parsed.seq, tasks: parsed.tasks && typeof parsed.tasks === 'object' ? parsed.tasks : {} }
+        return {
+          date: parsed.date,
+          seq: parsed.seq,
+          tasks: parsed.tasks && typeof parsed.tasks === 'object' ? parsed.tasks : {},
+          generations: parsed.generations && typeof parsed.generations === 'object' ? parsed.generations : {},
+        }
       }
     } catch (error) {
       this.log.warn('Lark task counter read failed: %s', String(error))
     }
-    return { date: '', seq: 0, tasks: {} }
+    return { date: '', seq: 0, tasks: {}, generations: {} }
   }
 
-  private saveTaskCounter(counter: { date: string; seq: number; tasks: Record<string, { date: string; seq: number }> }): void {
+  private saveTaskCounter(counter: {
+    date: string
+    seq: number
+    tasks: Record<string, { date: string; seq: number }>
+    generations?: Record<string, number>
+  }): void {
     try {
       const file = this.config.taskCounterFile || join(this.config.cwd, '.lark-task-counter.json')
       mkdirSync(dirname(file), { recursive: true })

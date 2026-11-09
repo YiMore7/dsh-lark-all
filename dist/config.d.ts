@@ -112,6 +112,8 @@ export interface Config {
     taskReasoningEffort: string;
     /** Identity shown in the fixed task-report prefix (e.g. `wdsh`). */
     reportIdentity: string;
+    /** Whether newly created task sessions are pinned to danger-full-access (default false). */
+    taskFullAccess: boolean;
     /** Custom path for the per-day task counter file; empty uses `<cwd>/.lark-task-counter.json`. */
     taskCounterFile: string;
     /** The exact main-chat message (trimmed) that triggers a process restart. */

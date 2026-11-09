@@ -116,6 +116,8 @@ export interface Config {
   taskReasoningEffort: string
   /** Identity shown in the fixed task-report prefix (e.g. `wdsh`). */
   reportIdentity: string
+  /** Whether newly created task sessions are pinned to danger-full-access (default false). */
+  taskFullAccess: boolean
   /** Custom path for the per-day task counter file; empty uses `<cwd>/.lark-task-counter.json`. */
   taskCounterFile: string
   /** The exact main-chat message (trimmed) that triggers a process restart. */
@@ -181,6 +183,7 @@ export const Config: z<Config> = z.object({
   taskDefaultPreset: z.string().default('code'),
   taskReasoningEffort: z.string().default('max'),
   reportIdentity: z.string().default('wdsh'),
+  taskFullAccess: z.boolean().default(false),
   taskCounterFile: z.string().default(''),
   restartCommand: z.string().default('重启进程'),
   restartMarkerFile: z.string().default(''),
@@ -188,12 +191,11 @@ export const Config: z<Config> = z.object({
   restartLogFile: z.string().default(''),
   restartExitDelayMs: z.number().step(1).min(500).max(60_000).default(4_000),
   systemPrompt: z.string().default(
-    'You are replying through Feishu/Lark. Keep replies clear and suitable for chat. '
-    + 'Do not reveal credentials or internal system data. When a request needs an interactive approval '
-    + 'that this channel cannot provide, explain what approval is needed instead of waiting indefinitely. '
-    + 'To attach files to your reply, put a marker on its own line: [lark-file: <path or URL>], '
-    + '[lark-image: <path or URL>] (original image), [lark-voice: <path or URL>] (opus audio), '
-    + '[lark-video: <path or URL>] (mp4 video), or [lark-doc: <path.md>] (create a Feishu cloud doc). '
-    + 'Local paths must be absolute and inside the allowed media directories (the working directory by default).',
+    '你通过飞书与用户(YiM)对话。遵守以下通道规则:\n'
+    + '1. 会话模型:主聊天是一个常驻个人会话(上下文连续);聊天内的每个「话题」是独立的任务会话(上下文隔离、流式卡片反馈)。支持斜杠命令(/new 重置主会话上下文、/tasks 查看运行中任务列表、/help 查看帮助)。不要建议用户去 GUI 操作,用户主要在手机上。\n'
+    + '2. 回复风格:清晰、适合聊天阅读;中文为主;长任务放话题里执行并给出进度。\n'
+    + '3. 不要泄露凭证或内部系统数据。\n'
+    + '4. 若某个请求需要交互审批而本通道无法提供,明确说明需要什么审批,不要无限等待。\n'
+    + '5. 附件标记(单独一行):[lark-file: <path or URL>] 附文件;[lark-image: <path or URL>] 原图;[lark-voice: <path or URL>] opus 语音;[lark-video: <path or URL>] mp4 视频;[lark-doc: <path.md>] 生成飞书云文档。本地路径必须绝对且位于允许的媒体目录内(默认为工作目录)。',
   ),
 })

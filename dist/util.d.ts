@@ -1,6 +1,6 @@
 import type { NormalizedMessage } from '@larksuiteoapi/node-sdk';
 /** Deterministic, non-identifying DSH session id for one Lark conversation. */
-export declare function sessionIdFor(accountId: string, message: Pick<NormalizedMessage, 'chatType' | 'chatId' | 'threadId'>, threadSessions?: boolean): string;
+export declare function sessionIdFor(accountId: string, message: Pick<NormalizedMessage, 'chatType' | 'chatId' | 'threadId'>, threadSessions?: boolean, generation?: number): string;
 /**
  * Deterministic DSH session id for one task. A task is anchored at the
  * message that started it (the thread root): the anchor is the task message's

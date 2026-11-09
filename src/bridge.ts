@@ -141,18 +141,22 @@ export class LarkHarnessBridge {
   }
 
   private async handleMessageCore(message: NormalizedMessage): Promise<void> {
-    const command = message.content.trim().split(/\s+/, 1)[0]?.toLowerCase()
-    if (command === '/bot-ping') {
+    const rawWord = message.content.trim().split(/\s+/, 1)[0]?.toLowerCase() || ''
+    const command = rawWord.startsWith('/bot-') ? rawWord.replace('/bot-', '/') : rawWord
+
+    if (command === '/ping') {
       await this.sendReply(message, { text: 'pong — DeepSeek Harness 飞书机器人已连接。', images: [] })
       return
     }
-    if (command === '/bot-help') {
+    if (command === '/help') {
       const help = [
-        'DeepSeek Harness 飞书机器人',
-        '/bot-ping — 检查连通性',
-        '/bot-image-test — 发送蓝色图片，检查图片链路',
-        '/bot-status — 查看当前连接状态',
-        '/bot-cancel — 取消当前生成',
+        'DeepSeek Harness 飞书机器人命令：',
+        '/new — 重置主聊天会话上下文，开启全新会话',
+        '/tasks — 查看当前进行中的任务话题列表',
+        '/ping — 检查连通性',
+        '/status — 查看当前连接与持久化状态',
+        '/cancel — 取消当前正在生成的回复',
+        '/image-test — 发送蓝色图片，检查图片链路',
       ]
       if (this.config.outboundMedia) {
         help.push(
@@ -165,27 +169,54 @@ export class LarkHarnessBridge {
         )
       }
       help.push(
-        '任务会话：消息以「ptc任务：」「标准任务：」「极简任务：」「创造任务：」「任务：」开头时创建独立会话（与 Web 相同模式），在该消息的话题里继续对话即可。',
+        '任务会话：消息以「ptc任务：」「标准任务：」「极简任务：」「创造任务：」「任务：」开头时创建独立话题会话（与 Web 相同模式），在该消息的话题里继续对话即可。',
         '其他消息会交给当前 Harness 默认模型处理。',
       )
       await this.sendReply(message, { text: help.join('\n'), images: [] })
       return
     }
-    if (command === '/bot-image-test') {
+    if (command === '/new') {
+      const conversations = this.requireConversations()
+      const isTaskThread = message.threadId !== undefined || message.rootId !== undefined || conversations.taskIdFor(message) !== undefined
+      if (isTaskThread) {
+        await this.sendReply(message, {
+          text: '当前处于独立任务话题中，任务话题上下文已独立。如需开启新任务，请在主聊天发送「任务：...」发起。',
+          images: [],
+        })
+        return
+      }
+      conversations.cancel(message)
+      const nextGen = conversations.resetChatGeneration(message.chatId)
+      this.log.info('Lark chat %s reset context (gen: %d)', message.chatId, nextGen)
+      await this.sendReply(message, {
+        text: `✅ 已重置主聊天上下文（代次: gen-${nextGen}）。\n后续消息将使用全新空白上下文。历史会话已在本地安全封存。`,
+        images: [],
+      })
+      return
+    }
+    if (command === '/tasks') {
+      const conversations = this.requireConversations()
+      const summary = conversations.getActiveTasksSummary()
+      await this.sendReply(message, { text: summary, images: [] })
+      return
+    }
+    if (command === '/image-test') {
       await this.sendReply(message, {
         text: '蓝色测试图片发送成功。',
         images: [{ data: OUTBOUND_TEST_PNG, mediaType: 'image/png', name: 'lark-image-test.png' }],
       })
       return
     }
-    if (command === '/bot-status') {
+    if (command === '/status') {
+      const conversations = this.requireConversations()
+      const gen = conversations.getChatGeneration(message.chatId)
       await this.sendReply(message, {
-        text: '飞书/Lark WebSocket 长连接正常，DeepSeek Harness 会话按聊天/任务独立持久化。',
+        text: `飞书/Lark WebSocket 长连接正常。\n当前主聊天代次: gen-${gen}。\n任务会话按话题独立隔离，持久化正常。`,
         images: [],
       })
       return
     }
-    if (command === '/bot-cancel') {
+    if (command === '/cancel') {
       const cancelled = this.requireConversations().cancel(message)
       await this.sendReply(message, {
         text: cancelled ? '已请求取消当前生成。' : '当前没有正在生成的回复。',
@@ -198,8 +229,9 @@ export class LarkHarnessBridge {
     // video / cloud document to this chat. Sources are realpath-checked
     // against `outboundAllowedDirs` (defaults to cwd); URLs are fetched by
     // the SDK with its built-in SSRF guard.
-    if (this.config.outboundMedia && command?.startsWith('/bot-send-')) {
-      await this.handleSendMediaCommand(message, command)
+    if (this.config.outboundMedia && (rawWord.startsWith('/bot-send-') || rawWord.startsWith('/send-'))) {
+      const mediaCmd = rawWord.startsWith('/send-') ? rawWord.replace('/send-', '/bot-send-') : rawWord
+      await this.handleSendMediaCommand(message, mediaCmd)
       return
     }
 

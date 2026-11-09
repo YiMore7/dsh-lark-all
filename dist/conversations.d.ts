@@ -131,6 +131,14 @@ export declare class ConversationManager {
     private withReportPrefix;
     /** Assign the per-day sequential task number for a task session (resets at 00:00 local time). */
     private assignTaskSeq;
+    /** Retrieve current generation number for one chat (default 0). */
+    getChatGeneration(chatId: string): number;
+    /** Reset chat context by bumping generation, returning new generation number. */
+    resetChatGeneration(chatId: string): number;
+    /** Deterministic main-chat session id considering generation resets. */
+    mainSessionIdFor(message: NormalizedMessage): string;
+    /** Formatted summary of active/registered task sessions for /tasks command. */
+    getActiveTasksSummary(): string;
     private loadTaskCounter;
     private saveTaskCounter;
 }

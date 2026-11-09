@@ -133063,11 +133063,12 @@ import { basename, extname, isAbsolute, join, resolve, sep } from "node:path";
 
 // src/util.ts
 import { createHash } from "node:crypto";
-function sessionIdFor(accountId, message, threadSessions = false) {
+function sessionIdFor(accountId, message, threadSessions = false, generation = 0) {
   const scope = message.chatType === "group" ? "group" : "single";
   const thread = threadSessions && message.threadId ? `\0${message.threadId}` : "";
   if (message.chatId.length === 0) throw new Error(`Lark ${scope} message has no chat identifier`);
-  const digest = createHash("sha256").update(`${accountId}\0${scope}\0${message.chatId}${thread}`).digest("hex").slice(0, 32);
+  const genSuffix = generation > 0 ? `\0gen${generation}` : "";
+  const digest = createHash("sha256").update(`${accountId}\0${scope}\0${message.chatId}${thread}${genSuffix}`).digest("hex").slice(0, 32);
   return `lark-v1-${scope}-${digest}`;
 }
 function taskSessionIdFor(accountId, chatId, anchorId) {
@@ -133745,7 +133746,7 @@ var ConversationManager = class {
   }
   /** Process one inbound message after earlier work in the same Lark conversation. */
   process(message, channel) {
-    const id = sessionIdFor(this.config.accountId || this.config.appId, message);
+    const id = this.mainSessionIdFor(message);
     this.preemptQueued(id);
     const previous = this.queues.get(id) ?? Promise.resolve();
     const current = previous.catch(() => void 0).then(() => this.processNow(id, message, channel));
@@ -133779,7 +133780,7 @@ var ConversationManager = class {
   }
   /** Cancel active work for one Lark conversation or task thread. */
   cancel(message) {
-    const id = this.taskIdFor(message) ?? sessionIdFor(this.config.accountId || this.config.appId, message);
+    const id = this.taskIdFor(message) ?? this.mainSessionIdFor(message);
     const agent = this.handles.get(id)?.agent ?? this.ctx.agents.get(SessionId(id));
     if (agent === void 0 || agent.status === "idle") return false;
     agent.cancel({ kind: "user" });
@@ -133841,6 +133842,25 @@ var ConversationManager = class {
     const handle = await this.getOrCreate(taskId, preset);
     this.assignTaskSeq(taskId);
     const agent = handle.agent;
+    const currentTurns = this.taskTurns.get(taskId) ?? 0;
+    if (currentTurns === 0) {
+      const rawTitle = (taskContent || message.content || "\u4EFB\u52A1").trim().replace(/[\r\n\t]+/g, " ");
+      const title = rawTitle.slice(0, 24) || "\u98DE\u4E66\u4EFB\u52A1";
+      try {
+        const sessionTitle = this.ctx.get("sessionTitle");
+        if (sessionTitle?.rename) {
+          sessionTitle.rename(agent.session, title);
+        } else {
+          agent.session.append("session/title", {
+            title,
+            messageSeqs: [],
+            source: { kind: "user" }
+          });
+        }
+      } catch (error) {
+        this.log.warn("Failed to set task session title (%s): %s", taskId, String(error));
+      }
+    }
     const start = getSessionEventCount(agent.session);
     const includeImages = await this.includeImages(agent);
     const content = await inboundContent(
@@ -134134,7 +134154,7 @@ var ConversationManager = class {
         content: [{ type: "text", text: this.config.systemPrompt }],
         source: { kind: "plugin:deepseek-harness-lark", form: "instructions" }
       }));
-      if (id.startsWith("lark-v1-task-")) this.pinFullAccess(handle);
+      if (id.startsWith("lark-v1-task-") && this.config.taskFullAccess) this.pinFullAccess(handle);
       return handle;
     } catch (error) {
       if (String(error).includes("already exists")) {
@@ -134159,6 +134179,7 @@ var ConversationManager = class {
    * switch only logs a warning; the task itself still runs.
    */
   pinFullAccess(handle) {
+    if (!this.config.taskFullAccess) return;
     const presets = this.ctx.get("permissionPresets");
     if (presets === void 0) {
       this.log.warn("Lark task Full access pin skipped: permissionPresets service unavailable");
@@ -134188,8 +134209,14 @@ var ConversationManager = class {
       }
     }
     const finalTurn = [...events].reverse().find((event) => event.type === "turn/end");
-    if (texts.length === 0 && finalTurn?.type === "turn/end" && finalTurn.data.reason.kind === "error") {
-      return { text: `\u5904\u7406\u5931\u8D25\uFF08${finalTurn.data.reason.error.code}\uFF09\uFF0C\u8BF7\u7A0D\u540E\u91CD\u8BD5\u3002`, images };
+    if (finalTurn?.type === "turn/end" && finalTurn.data.reason.kind === "error") {
+      const err = finalTurn.data.reason.error;
+      const errDetail = typeof err === "object" ? JSON.stringify(err) : String(err);
+      this.log.error("Turn error occurred: %s", errDetail);
+      console.error(`[dsh-lark] Turn error: ${errDetail}`);
+      if (texts.length === 0) {
+        return { text: `\u5904\u7406\u5931\u8D25\uFF08${err.code}\uFF09\uFF1A${err.message || "\u8BF7\u7A0D\u540E\u91CD\u8BD5\u3002"}`, images };
+      }
     }
     if (texts.length === 0 && images.length === 0) {
       return { text: "\u5904\u7406\u5B8C\u6210\uFF0C\u4F46\u6CA1\u6709\u751F\u6210\u53EF\u53D1\u9001\u7684\u5185\u5BB9\u3002", images };
@@ -134235,18 +134262,57 @@ ${text}`, images: reply.images };
     this.saveTaskCounter(counter);
     this.taskSeq.set(taskId, { date: date2, seq: counter.seq });
   }
+  /** Retrieve current generation number for one chat (default 0). */
+  getChatGeneration(chatId) {
+    return this.loadTaskCounter().generations?.[chatId] ?? 0;
+  }
+  /** Reset chat context by bumping generation, returning new generation number. */
+  resetChatGeneration(chatId) {
+    const counter = this.loadTaskCounter();
+    const generations = counter.generations ?? {};
+    const current = generations[chatId] ?? 0;
+    const next = current + 1;
+    generations[chatId] = next;
+    counter.generations = generations;
+    this.saveTaskCounter(counter);
+    return next;
+  }
+  /** Deterministic main-chat session id considering generation resets. */
+  mainSessionIdFor(message) {
+    const gen = this.getChatGeneration(message.chatId);
+    return sessionIdFor(this.config.accountId || this.config.appId, message, false, gen);
+  }
+  /** Formatted summary of active/registered task sessions for /tasks command. */
+  getActiveTasksSummary() {
+    if (this.taskTurns.size === 0) {
+      return "\u5F53\u524D\u6682\u65E0\u8FD0\u884C\u4E2D\u7684\u4EFB\u52A1\u8BDD\u9898\u3002\u5728\u4E3B\u804A\u5929\u4E2D\u53D1\u9001\u300C\u4EFB\u52A1\uFF1A...\u300D\u5373\u53EF\u521B\u5EFA\u72EC\u7ACB\u4EFB\u52A1\u8BDD\u9898\u3002";
+    }
+    const lines = ["\u5F53\u524D\u4EFB\u52A1\u8BDD\u9898\u5217\u8868\uFF1A"];
+    for (const [taskId, turns] of this.taskTurns.entries()) {
+      const mode = this.taskModes.get(taskId) ?? "\u9ED8\u8BA4";
+      const seq = this.taskSeq.get(taskId);
+      const prefix = seq ? `[${seq.date}-\u4EFB\u52A1-${seq.seq}]` : `[${taskId.slice(-8)}]`;
+      lines.push(`\u2022 ${prefix}: \u6A21\u5F0F=${mode}, \u5DF2\u5B8C\u6210 ${turns} \u8F6E\u5BF9\u8BDD (id: ${taskId})`);
+    }
+    return lines.join("\n");
+  }
   loadTaskCounter() {
     try {
       const file = this.config.taskCounterFile || join2(this.config.cwd, ".lark-task-counter.json");
       const raw = readFileSync(file, "utf8");
       const parsed = JSON.parse(raw);
       if (parsed && typeof parsed === "object" && typeof parsed.date === "string" && typeof parsed.seq === "number") {
-        return { date: parsed.date, seq: parsed.seq, tasks: parsed.tasks && typeof parsed.tasks === "object" ? parsed.tasks : {} };
+        return {
+          date: parsed.date,
+          seq: parsed.seq,
+          tasks: parsed.tasks && typeof parsed.tasks === "object" ? parsed.tasks : {},
+          generations: parsed.generations && typeof parsed.generations === "object" ? parsed.generations : {}
+        };
       }
     } catch (error) {
       this.log.warn("Lark task counter read failed: %s", String(error));
     }
-    return { date: "", seq: 0, tasks: {} };
+    return { date: "", seq: 0, tasks: {}, generations: {} };
   }
   saveTaskCounter(counter) {
     try {
@@ -134465,18 +134531,21 @@ var LarkHarnessBridge = class {
     }
   }
   async handleMessageCore(message) {
-    const command = message.content.trim().split(/\s+/, 1)[0]?.toLowerCase();
-    if (command === "/bot-ping") {
+    const rawWord = message.content.trim().split(/\s+/, 1)[0]?.toLowerCase() || "";
+    const command = rawWord.startsWith("/bot-") ? rawWord.replace("/bot-", "/") : rawWord;
+    if (command === "/ping") {
       await this.sendReply(message, { text: "pong \u2014 DeepSeek Harness \u98DE\u4E66\u673A\u5668\u4EBA\u5DF2\u8FDE\u63A5\u3002", images: [] });
       return;
     }
-    if (command === "/bot-help") {
+    if (command === "/help") {
       const help = [
-        "DeepSeek Harness \u98DE\u4E66\u673A\u5668\u4EBA",
-        "/bot-ping \u2014 \u68C0\u67E5\u8FDE\u901A\u6027",
-        "/bot-image-test \u2014 \u53D1\u9001\u84DD\u8272\u56FE\u7247\uFF0C\u68C0\u67E5\u56FE\u7247\u94FE\u8DEF",
-        "/bot-status \u2014 \u67E5\u770B\u5F53\u524D\u8FDE\u63A5\u72B6\u6001",
-        "/bot-cancel \u2014 \u53D6\u6D88\u5F53\u524D\u751F\u6210"
+        "DeepSeek Harness \u98DE\u4E66\u673A\u5668\u4EBA\u547D\u4EE4\uFF1A",
+        "/new \u2014 \u91CD\u7F6E\u4E3B\u804A\u5929\u4F1A\u8BDD\u4E0A\u4E0B\u6587\uFF0C\u5F00\u542F\u5168\u65B0\u4F1A\u8BDD",
+        "/tasks \u2014 \u67E5\u770B\u5F53\u524D\u8FDB\u884C\u4E2D\u7684\u4EFB\u52A1\u8BDD\u9898\u5217\u8868",
+        "/ping \u2014 \u68C0\u67E5\u8FDE\u901A\u6027",
+        "/status \u2014 \u67E5\u770B\u5F53\u524D\u8FDE\u63A5\u4E0E\u6301\u4E45\u5316\u72B6\u6001",
+        "/cancel \u2014 \u53D6\u6D88\u5F53\u524D\u6B63\u5728\u751F\u6210\u7684\u56DE\u590D",
+        "/image-test \u2014 \u53D1\u9001\u84DD\u8272\u56FE\u7247\uFF0C\u68C0\u67E5\u56FE\u7247\u94FE\u8DEF"
       ];
       if (this.config.outboundMedia) {
         help.push(
@@ -134489,27 +134558,57 @@ var LarkHarnessBridge = class {
         );
       }
       help.push(
-        "\u4EFB\u52A1\u4F1A\u8BDD\uFF1A\u6D88\u606F\u4EE5\u300Cptc\u4EFB\u52A1\uFF1A\u300D\u300C\u6807\u51C6\u4EFB\u52A1\uFF1A\u300D\u300C\u6781\u7B80\u4EFB\u52A1\uFF1A\u300D\u300C\u521B\u9020\u4EFB\u52A1\uFF1A\u300D\u300C\u4EFB\u52A1\uFF1A\u300D\u5F00\u5934\u65F6\u521B\u5EFA\u72EC\u7ACB\u4F1A\u8BDD\uFF08\u4E0E Web \u76F8\u540C\u6A21\u5F0F\uFF09\uFF0C\u5728\u8BE5\u6D88\u606F\u7684\u8BDD\u9898\u91CC\u7EE7\u7EED\u5BF9\u8BDD\u5373\u53EF\u3002",
+        "\u4EFB\u52A1\u4F1A\u8BDD\uFF1A\u6D88\u606F\u4EE5\u300Cptc\u4EFB\u52A1\uFF1A\u300D\u300C\u6807\u51C6\u4EFB\u52A1\uFF1A\u300D\u300C\u6781\u7B80\u4EFB\u52A1\uFF1A\u300D\u300C\u521B\u9020\u4EFB\u52A1\uFF1A\u300D\u300C\u4EFB\u52A1\uFF1A\u300D\u5F00\u5934\u65F6\u521B\u5EFA\u72EC\u7ACB\u8BDD\u9898\u4F1A\u8BDD\uFF08\u4E0E Web \u76F8\u540C\u6A21\u5F0F\uFF09\uFF0C\u5728\u8BE5\u6D88\u606F\u7684\u8BDD\u9898\u91CC\u7EE7\u7EED\u5BF9\u8BDD\u5373\u53EF\u3002",
         "\u5176\u4ED6\u6D88\u606F\u4F1A\u4EA4\u7ED9\u5F53\u524D Harness \u9ED8\u8BA4\u6A21\u578B\u5904\u7406\u3002"
       );
       await this.sendReply(message, { text: help.join("\n"), images: [] });
       return;
     }
-    if (command === "/bot-image-test") {
+    if (command === "/new") {
+      const conversations2 = this.requireConversations();
+      const isTaskThread = message.threadId !== void 0 || message.rootId !== void 0 || conversations2.taskIdFor(message) !== void 0;
+      if (isTaskThread) {
+        await this.sendReply(message, {
+          text: "\u5F53\u524D\u5904\u4E8E\u72EC\u7ACB\u4EFB\u52A1\u8BDD\u9898\u4E2D\uFF0C\u4EFB\u52A1\u8BDD\u9898\u4E0A\u4E0B\u6587\u5DF2\u72EC\u7ACB\u3002\u5982\u9700\u5F00\u542F\u65B0\u4EFB\u52A1\uFF0C\u8BF7\u5728\u4E3B\u804A\u5929\u53D1\u9001\u300C\u4EFB\u52A1\uFF1A...\u300D\u53D1\u8D77\u3002",
+          images: []
+        });
+        return;
+      }
+      conversations2.cancel(message);
+      const nextGen = conversations2.resetChatGeneration(message.chatId);
+      this.log.info("Lark chat %s reset context (gen: %d)", message.chatId, nextGen);
+      await this.sendReply(message, {
+        text: `\u2705 \u5DF2\u91CD\u7F6E\u4E3B\u804A\u5929\u4E0A\u4E0B\u6587\uFF08\u4EE3\u6B21: gen-${nextGen}\uFF09\u3002
+\u540E\u7EED\u6D88\u606F\u5C06\u4F7F\u7528\u5168\u65B0\u7A7A\u767D\u4E0A\u4E0B\u6587\u3002\u5386\u53F2\u4F1A\u8BDD\u5DF2\u5728\u672C\u5730\u5B89\u5168\u5C01\u5B58\u3002`,
+        images: []
+      });
+      return;
+    }
+    if (command === "/tasks") {
+      const conversations2 = this.requireConversations();
+      const summary = conversations2.getActiveTasksSummary();
+      await this.sendReply(message, { text: summary, images: [] });
+      return;
+    }
+    if (command === "/image-test") {
       await this.sendReply(message, {
         text: "\u84DD\u8272\u6D4B\u8BD5\u56FE\u7247\u53D1\u9001\u6210\u529F\u3002",
         images: [{ data: OUTBOUND_TEST_PNG, mediaType: "image/png", name: "lark-image-test.png" }]
       });
       return;
     }
-    if (command === "/bot-status") {
+    if (command === "/status") {
+      const conversations2 = this.requireConversations();
+      const gen = conversations2.getChatGeneration(message.chatId);
       await this.sendReply(message, {
-        text: "\u98DE\u4E66/Lark WebSocket \u957F\u8FDE\u63A5\u6B63\u5E38\uFF0CDeepSeek Harness \u4F1A\u8BDD\u6309\u804A\u5929/\u4EFB\u52A1\u72EC\u7ACB\u6301\u4E45\u5316\u3002",
+        text: `\u98DE\u4E66/Lark WebSocket \u957F\u8FDE\u63A5\u6B63\u5E38\u3002
+\u5F53\u524D\u4E3B\u804A\u5929\u4EE3\u6B21: gen-${gen}\u3002
+\u4EFB\u52A1\u4F1A\u8BDD\u6309\u8BDD\u9898\u72EC\u7ACB\u9694\u79BB\uFF0C\u6301\u4E45\u5316\u6B63\u5E38\u3002`,
         images: []
       });
       return;
     }
-    if (command === "/bot-cancel") {
+    if (command === "/cancel") {
       const cancelled = this.requireConversations().cancel(message);
       await this.sendReply(message, {
         text: cancelled ? "\u5DF2\u8BF7\u6C42\u53D6\u6D88\u5F53\u524D\u751F\u6210\u3002" : "\u5F53\u524D\u6CA1\u6709\u6B63\u5728\u751F\u6210\u7684\u56DE\u590D\u3002",
@@ -134517,8 +134616,9 @@ var LarkHarnessBridge = class {
       });
       return;
     }
-    if (this.config.outboundMedia && command?.startsWith("/bot-send-")) {
-      await this.handleSendMediaCommand(message, command);
+    if (this.config.outboundMedia && (rawWord.startsWith("/bot-send-") || rawWord.startsWith("/send-"))) {
+      const mediaCmd = rawWord.startsWith("/send-") ? rawWord.replace("/send-", "/bot-send-") : rawWord;
+      await this.handleSendMediaCommand(message, mediaCmd);
       return;
     }
     const conversations = this.requireConversations();
@@ -135972,6 +136072,7 @@ var Config = Schema.object({
   taskDefaultPreset: Schema.string().default("code"),
   taskReasoningEffort: Schema.string().default("max"),
   reportIdentity: Schema.string().default("wdsh"),
+  taskFullAccess: Schema.boolean().default(false),
   taskCounterFile: Schema.string().default(""),
   restartCommand: Schema.string().default("\u91CD\u542F\u8FDB\u7A0B"),
   restartMarkerFile: Schema.string().default(""),
@@ -135979,7 +136080,7 @@ var Config = Schema.object({
   restartLogFile: Schema.string().default(""),
   restartExitDelayMs: Schema.number().step(1).min(500).max(6e4).default(4e3),
   systemPrompt: Schema.string().default(
-    "You are replying through Feishu/Lark. Keep replies clear and suitable for chat. Do not reveal credentials or internal system data. When a request needs an interactive approval that this channel cannot provide, explain what approval is needed instead of waiting indefinitely. To attach files to your reply, put a marker on its own line: [lark-file: <path or URL>], [lark-image: <path or URL>] (original image), [lark-voice: <path or URL>] (opus audio), [lark-video: <path or URL>] (mp4 video), or [lark-doc: <path.md>] (create a Feishu cloud doc). Local paths must be absolute and inside the allowed media directories (the working directory by default)."
+    "\u4F60\u901A\u8FC7\u98DE\u4E66\u4E0E\u7528\u6237(YiM)\u5BF9\u8BDD\u3002\u9075\u5B88\u4EE5\u4E0B\u901A\u9053\u89C4\u5219:\n1. \u4F1A\u8BDD\u6A21\u578B:\u4E3B\u804A\u5929\u662F\u4E00\u4E2A\u5E38\u9A7B\u4E2A\u4EBA\u4F1A\u8BDD(\u4E0A\u4E0B\u6587\u8FDE\u7EED);\u804A\u5929\u5185\u7684\u6BCF\u4E2A\u300C\u8BDD\u9898\u300D\u662F\u72EC\u7ACB\u7684\u4EFB\u52A1\u4F1A\u8BDD(\u4E0A\u4E0B\u6587\u9694\u79BB\u3001\u6D41\u5F0F\u5361\u7247\u53CD\u9988)\u3002\u652F\u6301\u659C\u6760\u547D\u4EE4(/new \u91CD\u7F6E\u4E3B\u4F1A\u8BDD\u4E0A\u4E0B\u6587\u3001/tasks \u67E5\u770B\u8FD0\u884C\u4E2D\u4EFB\u52A1\u5217\u8868\u3001/help \u67E5\u770B\u5E2E\u52A9)\u3002\u4E0D\u8981\u5EFA\u8BAE\u7528\u6237\u53BB GUI \u64CD\u4F5C,\u7528\u6237\u4E3B\u8981\u5728\u624B\u673A\u4E0A\u3002\n2. \u56DE\u590D\u98CE\u683C:\u6E05\u6670\u3001\u9002\u5408\u804A\u5929\u9605\u8BFB;\u4E2D\u6587\u4E3A\u4E3B;\u957F\u4EFB\u52A1\u653E\u8BDD\u9898\u91CC\u6267\u884C\u5E76\u7ED9\u51FA\u8FDB\u5EA6\u3002\n3. \u4E0D\u8981\u6CC4\u9732\u51ED\u8BC1\u6216\u5185\u90E8\u7CFB\u7EDF\u6570\u636E\u3002\n4. \u82E5\u67D0\u4E2A\u8BF7\u6C42\u9700\u8981\u4EA4\u4E92\u5BA1\u6279\u800C\u672C\u901A\u9053\u65E0\u6CD5\u63D0\u4F9B,\u660E\u786E\u8BF4\u660E\u9700\u8981\u4EC0\u4E48\u5BA1\u6279,\u4E0D\u8981\u65E0\u9650\u7B49\u5F85\u3002\n5. \u9644\u4EF6\u6807\u8BB0(\u5355\u72EC\u4E00\u884C):[lark-file: <path or URL>] \u9644\u6587\u4EF6;[lark-image: <path or URL>] \u539F\u56FE;[lark-voice: <path or URL>] opus \u8BED\u97F3;[lark-video: <path or URL>] mp4 \u89C6\u9891;[lark-doc: <path.md>] \u751F\u6210\u98DE\u4E66\u4E91\u6587\u6863\u3002\u672C\u5730\u8DEF\u5F84\u5FC5\u987B\u7EDD\u5BF9\u4E14\u4F4D\u4E8E\u5141\u8BB8\u7684\u5A92\u4F53\u76EE\u5F55\u5185(\u9ED8\u8BA4\u4E3A\u5DE5\u4F5C\u76EE\u5F55)\u3002"
   )
 });
 
