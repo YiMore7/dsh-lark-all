@@ -60,8 +60,14 @@ export class ConversationManager {
 
   /** Snapshot persisted identities once before accepting traffic. */
   async initialize(): Promise<void> {
-    const headers = await this.ctx.sessionPersistence.list()
-    this.persistedIds = new Set(headers.map(header => String(header.id)))
+    try {
+      const listResult = await this.ctx.sessionPersistence.list()
+      this.persistedIds = new Set(
+        listResult.map((item: any) => String(item.header?.id ?? item.id ?? item)),
+      )
+    } catch (error) {
+      this.log.warn('Failed to snapshot persisted session ids: %s', String(error))
+    }
   }
 
   /**
@@ -509,7 +515,19 @@ export class ConversationManager {
     const sessionId = SessionId(id)
     const current = this.ctx.agentDefaultModel.currentSelection()
     const agentOptions = { provider: current.provider, model: current.model }
-    if (this.persistedIds.has(id)) {
+
+    let exists = this.persistedIds.has(id)
+    if (!exists) {
+      try {
+        await this.ctx.sessionPersistence.inspect(sessionId)
+        exists = true
+        this.persistedIds.add(id)
+      } catch {
+        exists = false
+      }
+    }
+
+    if (exists) {
       const stored = await this.storedPreset(id)
       const composed = await this.presetSetup(stored)
       return this.ctx.agents.resume({ resumeSessionId: sessionId, agentOptions, ...(composed.setup === undefined ? {} : { setup: composed.setup }) })
@@ -549,25 +567,41 @@ export class ConversationManager {
       if (composed.setup !== undefined) await composed.setup(agentCtx)
       installModelSelection(agentCtx, { current: selection, assembled: undefined })
     }
-    const handle = await this.ctx.agents.create({
-      sessionId,
-      meta: {
-        cwd: this.config.cwd,
-        ...(composed.agentPreset === undefined ? {} : { agentPreset: composed.agentPreset }),
-      },
-      agentOptions,
-      setup,
-    })
-    this.persistedIds.add(id)
-    handle.agent.inject(createUserMessage({
-      content: [{ type: 'text', text: this.config.systemPrompt }],
-      source: { kind: 'plugin', plugin: 'deepseek-harness-lark', form: 'instructions' },
-    }))
-    // Feishu-raised tasks run with Full access by default: pin the
-    // danger-full-access preset (sandbox + approval) on every fresh task
-    // session, independent of the deployment-wide default.
-    if (id.startsWith('lark-v1-task-')) this.pinFullAccess(handle)
-    return handle
+
+    try {
+      const handle = await this.ctx.agents.create({
+        sessionId,
+        meta: {
+          cwd: this.config.cwd,
+          ...(composed.agentPreset === undefined ? {} : { agentPreset: composed.agentPreset }),
+        },
+        agentOptions,
+        setup,
+      })
+      this.persistedIds.add(id)
+      handle.agent.inject(createUserMessage({
+        content: [{ type: 'text', text: this.config.systemPrompt }],
+        source: { kind: 'plugin', plugin: 'deepseek-harness-lark', form: 'instructions' },
+      }))
+      // Feishu-raised tasks run with Full access by default: pin the
+      // danger-full-access preset (sandbox + approval) on every fresh task
+      // session, independent of the deployment-wide default.
+      if (id.startsWith('lark-v1-task-')) this.pinFullAccess(handle)
+      return handle
+    } catch (error) {
+      if (String(error).includes('already exists')) {
+        this.log.warn('Session %s already exists on create, falling back to resume', id)
+        this.persistedIds.add(id)
+        const stored = await this.storedPreset(id)
+        const fallbackComposed = await this.presetSetup(stored)
+        return this.ctx.agents.resume({
+          resumeSessionId: sessionId,
+          agentOptions,
+          ...(fallbackComposed.setup === undefined ? {} : { setup: fallbackComposed.setup }),
+        })
+      }
+      throw error
+    }
   }
 
   /**

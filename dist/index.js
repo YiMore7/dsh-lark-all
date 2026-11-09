@@ -133670,8 +133670,14 @@ var ConversationManager = class {
   persistedIds = /* @__PURE__ */ new Set();
   /** Snapshot persisted identities once before accepting traffic. */
   async initialize() {
-    const headers = await this.ctx.sessionPersistence.list();
-    this.persistedIds = new Set(headers.map((header) => String(header.id)));
+    try {
+      const listResult = await this.ctx.sessionPersistence.list();
+      this.persistedIds = new Set(
+        listResult.map((item) => String(item.header?.id ?? item.id ?? item))
+      );
+    } catch (error) {
+      this.log.warn("Failed to snapshot persisted session ids: %s", String(error));
+    }
   }
   /**
    * The task session id a message belongs to. Thread messages resolve the
@@ -134050,7 +134056,17 @@ var ConversationManager = class {
     const sessionId = SessionId(id);
     const current = this.ctx.agentDefaultModel.currentSelection();
     const agentOptions = { provider: current.provider, model: current.model };
-    if (this.persistedIds.has(id)) {
+    let exists = this.persistedIds.has(id);
+    if (!exists) {
+      try {
+        await this.ctx.sessionPersistence.inspect(sessionId);
+        exists = true;
+        this.persistedIds.add(id);
+      } catch {
+        exists = false;
+      }
+    }
+    if (exists) {
       const stored = await this.storedPreset(id);
       const composed2 = await this.presetSetup(stored);
       return this.ctx.agents.resume({ resumeSessionId: sessionId, agentOptions, ...composed2.setup === void 0 ? {} : { setup: composed2.setup } });
@@ -134081,22 +134097,37 @@ var ConversationManager = class {
       if (composed.setup !== void 0) await composed.setup(agentCtx);
       installModelSelection(agentCtx, { current: selection, assembled: void 0 });
     };
-    const handle = await this.ctx.agents.create({
-      sessionId,
-      meta: {
-        cwd: this.config.cwd,
-        ...composed.agentPreset === void 0 ? {} : { agentPreset: composed.agentPreset }
-      },
-      agentOptions,
-      setup
-    });
-    this.persistedIds.add(id);
-    handle.agent.inject(createUserMessage({
-      content: [{ type: "text", text: this.config.systemPrompt }],
-      source: { kind: "plugin", plugin: "deepseek-harness-lark", form: "instructions" }
-    }));
-    if (id.startsWith("lark-v1-task-")) this.pinFullAccess(handle);
-    return handle;
+    try {
+      const handle = await this.ctx.agents.create({
+        sessionId,
+        meta: {
+          cwd: this.config.cwd,
+          ...composed.agentPreset === void 0 ? {} : { agentPreset: composed.agentPreset }
+        },
+        agentOptions,
+        setup
+      });
+      this.persistedIds.add(id);
+      handle.agent.inject(createUserMessage({
+        content: [{ type: "text", text: this.config.systemPrompt }],
+        source: { kind: "plugin", plugin: "deepseek-harness-lark", form: "instructions" }
+      }));
+      if (id.startsWith("lark-v1-task-")) this.pinFullAccess(handle);
+      return handle;
+    } catch (error) {
+      if (String(error).includes("already exists")) {
+        this.log.warn("Session %s already exists on create, falling back to resume", id);
+        this.persistedIds.add(id);
+        const stored = await this.storedPreset(id);
+        const fallbackComposed = await this.presetSetup(stored);
+        return this.ctx.agents.resume({
+          resumeSessionId: sessionId,
+          agentOptions,
+          ...fallbackComposed.setup === void 0 ? {} : { setup: fallbackComposed.setup }
+        });
+      }
+      throw error;
+    }
   }
   /**
    * Pin a freshly created task session to the Full access preset
