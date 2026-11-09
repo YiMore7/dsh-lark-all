@@ -134503,8 +134503,12 @@ var LarkHarnessBridge = class {
           );
           await this.sendReply(message, reply, true);
         } catch (error) {
-          this.log.error("Lark task message failed: %s", String(error));
-          await this.sendReply(message, { text: "\u521B\u5EFA\u4EFB\u52A1\u4F1A\u8BDD\u65F6\u53D1\u751F\u9519\u8BEF\uFF0C\u8BF7\u7A0D\u540E\u91CD\u8BD5\u3002", images: [] }, true);
+          const detail = error instanceof Error ? `${error.message}
+${error.stack}` : String(error);
+          this.traceRouting(message, `task-error: ${detail}`);
+          console.error("[dsh-lark-all] Lark task message failed:", error);
+          this.log.error("Lark task message failed: %s", detail);
+          await this.sendReply(message, { text: `\u521B\u5EFA\u4EFB\u52A1\u4F1A\u8BDD\u65F6\u53D1\u751F\u9519\u8BEF: ${error instanceof Error ? error.message : String(error)}`, images: [] }, true);
         }
         return;
       }
@@ -134514,8 +134518,12 @@ var LarkHarnessBridge = class {
       const reply = await conversations.process(message, this.requireChannel());
       await this.sendReply(message, reply);
     } catch (error) {
-      this.log.error("Lark message processing failed: %s", String(error));
-      await this.sendReply(message, { text: "\u5904\u7406\u6D88\u606F\u65F6\u53D1\u751F\u9519\u8BEF\uFF0C\u8BF7\u7A0D\u540E\u91CD\u8BD5\u3002", images: [] });
+      const detail = error instanceof Error ? `${error.message}
+${error.stack}` : String(error);
+      this.traceRouting(message, `process-error: ${detail}`);
+      console.error("[dsh-lark-all] Lark message processing failed:", error);
+      this.log.error("Lark message processing failed: %s", detail);
+      await this.sendReply(message, { text: `\u5904\u7406\u6D88\u606F\u65F6\u53D1\u751F\u9519\u8BEF: ${error instanceof Error ? error.message : String(error)}`, images: [] });
     }
   }
   /**

@@ -243,8 +243,11 @@ export class LarkHarnessBridge {
           )
           await this.sendReply(message, reply, true)
         } catch (error) {
-          this.log.error('Lark task message failed: %s', String(error))
-          await this.sendReply(message, { text: '创建任务会话时发生错误，请稍后重试。', images: [] }, true)
+          const detail = error instanceof Error ? `${error.message}\n${error.stack}` : String(error)
+          this.traceRouting(message, `task-error: ${detail}`)
+          console.error('[dsh-lark-all] Lark task message failed:', error)
+          this.log.error('Lark task message failed: %s', detail)
+          await this.sendReply(message, { text: `创建任务会话时发生错误: ${error instanceof Error ? error.message : String(error)}`, images: [] }, true)
         }
         return
       }
@@ -255,8 +258,11 @@ export class LarkHarnessBridge {
       const reply = await conversations.process(message, this.requireChannel())
       await this.sendReply(message, reply)
     } catch (error) {
-      this.log.error('Lark message processing failed: %s', String(error))
-      await this.sendReply(message, { text: '处理消息时发生错误，请稍后重试。', images: [] })
+      const detail = error instanceof Error ? `${error.message}\n${error.stack}` : String(error)
+      this.traceRouting(message, `process-error: ${detail}`)
+      console.error('[dsh-lark-all] Lark message processing failed:', error)
+      this.log.error('Lark message processing failed: %s', detail)
+      await this.sendReply(message, { text: `处理消息时发生错误: ${error instanceof Error ? error.message : String(error)}`, images: [] })
     }
   }
 
