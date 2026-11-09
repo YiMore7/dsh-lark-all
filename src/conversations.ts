@@ -19,6 +19,30 @@ import {
 import { inboundContent, type InboundMediaHandlers } from './inbound.js'
 import { sessionIdFor, taskAnchorFor, taskSessionIdFor, withTimeout } from './util.js'
 
+function getSessionEventCount(session: Session): number {
+  const s = session as any
+  if (typeof s.seq === 'number') return s.seq
+  if (typeof s.seq === 'function') return s.seq()
+  if (Array.isArray(s.events)) return s.events.length
+  if (Array.isArray(s.log)) return s.log.length
+  if (typeof s.snapshotEvents === 'function') return s.snapshotEvents().length
+  return 0
+}
+
+function getSessionEvents(session: Session, start = 0): readonly SessionEvent[] {
+  const s = session as any
+  if (typeof s.snapshotEvents === 'function') {
+    return s.snapshotEvents(start)
+  }
+  if (Array.isArray(s.events)) {
+    return s.events.slice(start)
+  }
+  if (Array.isArray(s.log)) {
+    return s.log.slice(start)
+  }
+  return []
+}
+
 /** Completed response from one Lark-triggered Harness turn. */
 export interface ConversationReply {
   text: string
@@ -224,7 +248,7 @@ export class ConversationManager {
   ): Promise<ConversationReply> {
     const handle = await this.getOrCreate(id, undefined)
     const agent = handle.agent
-    const start = agent.session.events.length
+    const start = getSessionEventCount(agent.session)
     const content = await inboundContent(
       this.ctx, this.config, channel, message, await this.includeImages(agent), undefined,
       this.mediaFactory?.(message),
@@ -235,7 +259,7 @@ export class ConversationManager {
     this.preemptRunning(agent)
     agent.followup(createUserMessage({ content, source: { kind: 'user' } }))
     await withTimeout(agent.whenIdle(), this.config.responseTimeoutMs, 'DeepSeek Harness response')
-    return this.collectReply(agent, agent.session.events.slice(start))
+    return this.collectReply(agent, getSessionEvents(agent.session, start))
   }
 
   private async processTaskNow(
@@ -249,7 +273,7 @@ export class ConversationManager {
     const handle = await this.getOrCreate(taskId, preset)
     this.assignTaskSeq(taskId)
     const agent = handle.agent
-    const start = agent.session.events.length
+    const start = getSessionEventCount(agent.session)
     const includeImages = await this.includeImages(agent)
     const content = await inboundContent(
       this.ctx, this.config, channel, message, includeImages, taskContent,
@@ -371,7 +395,7 @@ export class ConversationManager {
       })()
     }
     await turnPromise
-    return this.withReportPrefix(taskId, await this.collectReply(agent, agent.session.events.slice(start)))
+    return this.withReportPrefix(taskId, await this.collectReply(agent, getSessionEvents(agent.session, start)))
   }
 
   /**

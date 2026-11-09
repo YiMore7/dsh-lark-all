@@ -133641,6 +133641,28 @@ function startsWith(data, prefix) {
 }
 
 // src/conversations.ts
+function getSessionEventCount(session) {
+  const s = session;
+  if (typeof s.seq === "number") return s.seq;
+  if (typeof s.seq === "function") return s.seq();
+  if (Array.isArray(s.events)) return s.events.length;
+  if (Array.isArray(s.log)) return s.log.length;
+  if (typeof s.snapshotEvents === "function") return s.snapshotEvents().length;
+  return 0;
+}
+function getSessionEvents(session, start = 0) {
+  const s = session;
+  if (typeof s.snapshotEvents === "function") {
+    return s.snapshotEvents(start);
+  }
+  if (Array.isArray(s.events)) {
+    return s.events.slice(start);
+  }
+  if (Array.isArray(s.log)) {
+    return s.log.slice(start);
+  }
+  return [];
+}
 var MAX_TASK_MESSAGE_IDS = 1e4;
 var ConversationManager = class {
   constructor(ctx, config, mediaFactory) {
@@ -133800,7 +133822,7 @@ var ConversationManager = class {
   async processNow(id, message, channel) {
     const handle = await this.getOrCreate(id, void 0);
     const agent = handle.agent;
-    const start = agent.session.events.length;
+    const start = getSessionEventCount(agent.session);
     const content = await inboundContent(
       this.ctx,
       this.config,
@@ -133813,13 +133835,13 @@ var ConversationManager = class {
     this.preemptRunning(agent);
     agent.followup(createUserMessage({ content, source: { kind: "user" } }));
     await withTimeout(agent.whenIdle(), this.config.responseTimeoutMs, "DeepSeek Harness response");
-    return this.collectReply(agent, agent.session.events.slice(start));
+    return this.collectReply(agent, getSessionEvents(agent.session, start));
   }
   async processTaskNow(message, channel, taskId, preset, taskContent, modeLabel) {
     const handle = await this.getOrCreate(taskId, preset);
     this.assignTaskSeq(taskId);
     const agent = handle.agent;
-    const start = agent.session.events.length;
+    const start = getSessionEventCount(agent.session);
     const includeImages = await this.includeImages(agent);
     const content = await inboundContent(
       this.ctx,
@@ -133923,7 +133945,7 @@ var ConversationManager = class {
       })();
     }
     await turnPromise;
-    return this.withReportPrefix(taskId, await this.collectReply(agent, agent.session.events.slice(start)));
+    return this.withReportPrefix(taskId, await this.collectReply(agent, getSessionEvents(agent.session, start)));
   }
   /**
    * Fold one session event into the streaming card state (card format
