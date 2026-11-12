@@ -13897,7 +13897,7 @@ var require_axios = __commonJS({
     function getEnv2(key) {
       return process.env[key.toLowerCase()] || process.env[key.toUpperCase()] || "";
     }
-    var VERSION3 = "1.21.0";
+    var VERSION3 = "1.21.1";
     function parseProtocol2(url3) {
       const match = /^([-+\w]{1,25}):(?:\/\/)?/.exec(url3);
       return match && match[1].toLowerCase() || "";
@@ -17105,8 +17105,11 @@ var require_axios = __commonJS({
         throw new CanceledError3(null, config);
       }
     }
-    function elapsedSince2(start) {
-      return Math.max(0, Date.now() - start);
+    function resolveClock2() {
+      return typeof performance !== "undefined" && utils$1.isFunction(performance.now) ? () => performance.now() : Date.now;
+    }
+    function elapsedSince2(now, start) {
+      return Math.max(0, Math.round(now() - start));
     }
     function dispatchRequest2(_config) {
       const config = utils$1.toSafeFlatObject(_config);
@@ -17117,10 +17120,11 @@ var require_axios = __commonJS({
         config.headers.setContentType("application/x-www-form-urlencoded", false);
       }
       const adapter2 = adapters.getAdapter(config.adapter || defaults2.adapter, config);
-      const start = Date.now();
+      const now = resolveClock2();
+      const start = now();
       return adapter2(config).then(function onAdapterResolution(response) {
         throwIfCancellationRequested2(config);
-        response.duration = elapsedSince2(start);
+        response.duration = elapsedSince2(now, start);
         config.response = response;
         try {
           response.data = transformData2.call(config, config.transformResponse, response);
@@ -17133,7 +17137,7 @@ var require_axios = __commonJS({
         if (!isCancel3(reason)) {
           throwIfCancellationRequested2(config);
           if (reason && reason.response) {
-            reason.response.duration = elapsedSince2(start);
+            reason.response.duration = elapsedSince2(now, start);
             config.response = reason.response;
             try {
               reason.response.data = transformData2.call(config, config.transformResponse, reason.response);
@@ -124447,13 +124451,13 @@ ${block}
               throw err;
             }
             const delay = base * Math.pow(3, attempt - 1);
-            yield sleep(delay);
+            yield sleep2(delay);
           }
         }
         throw lastErr;
       });
     }
-    function sleep(ms) {
+    function sleep2(ms) {
       return new Promise((r) => setTimeout(r, ms));
     }
     var DEFAULT_CHUNK_LIMIT = 3500;
@@ -128763,7 +128767,7 @@ import { resolve as resolvePath } from "path";
 import zlib from "zlib";
 
 // node_modules/axios/lib/env/data.js
-var VERSION = "1.21.0";
+var VERSION = "1.21.1";
 
 // node_modules/axios/lib/helpers/parseProtocol.js
 function parseProtocol(url2) {
@@ -132264,8 +132268,11 @@ function throwIfCancellationRequested(config) {
     throw new CanceledError_default(null, config);
   }
 }
-function elapsedSince(start) {
-  return Math.max(0, Date.now() - start);
+function resolveClock() {
+  return typeof performance !== "undefined" && utils_default.isFunction(performance.now) ? () => performance.now() : Date.now;
+}
+function elapsedSince(now, start) {
+  return Math.max(0, Math.round(now() - start));
 }
 function dispatchRequest(_config) {
   const config = utils_default.toSafeFlatObject(_config);
@@ -132276,11 +132283,12 @@ function dispatchRequest(_config) {
     config.headers.setContentType("application/x-www-form-urlencoded", false);
   }
   const adapter2 = adapters_default.getAdapter(config.adapter || defaults_default.adapter, config);
-  const start = Date.now();
+  const now = resolveClock();
+  const start = now();
   return adapter2(config).then(
     function onAdapterResolution(response) {
       throwIfCancellationRequested(config);
-      response.duration = elapsedSince(start);
+      response.duration = elapsedSince(now, start);
       config.response = response;
       try {
         response.data = transformData.call(config, config.transformResponse, response);
@@ -132294,7 +132302,7 @@ function dispatchRequest(_config) {
       if (!isCancel(reason)) {
         throwIfCancellationRequested(config);
         if (reason && reason.response) {
-          reason.response.duration = elapsedSince(start);
+          reason.response.duration = elapsedSince(now, start);
           config.response = reason.response;
           try {
             reason.response.data = transformData.call(
@@ -133164,6 +133172,9 @@ function truncateText(text, maxChars, suffix = "\n\n[\u56DE\u590D\u5DF2\u622A\u6
   const available = Math.max(0, maxChars - suffixPoints.length);
   return points.slice(0, available).join("") + (suffixPoints.length <= maxChars ? suffix : "");
 }
+function sleep(ms) {
+  return new Promise((resolve4) => setTimeout(resolve4, ms));
+}
 async function withTimeout(task, timeoutMs, label) {
   let timer;
   try {
@@ -133664,6 +133675,15 @@ function getSessionEvents(session, start = 0) {
   }
   return [];
 }
+var SESSION_OWNED_RETRY_ATTEMPTS = 3;
+var SESSION_OWNED_RETRY_DELAY_MS = 1e4;
+function isSessionOwnedError(error) {
+  if (error instanceof Error) {
+    if (error.name === "SessionAlreadyOwnedError") return true;
+    if (error.message.includes("already owned by an active write handle")) return true;
+  }
+  return String(error).includes("already owned by an active write handle");
+}
 var MAX_TASK_MESSAGE_IDS = 1e4;
 var ConversationManager = class {
   constructor(ctx, config, mediaFactory) {
@@ -134098,6 +134118,27 @@ var ConversationManager = class {
     const sessionId = SessionId(id);
     const current = this.ctx.agentDefaultModel.currentSelection();
     const agentOptions = { provider: current.provider, model: current.model };
+    const resumeToleratingLease = async (setup2) => {
+      for (let attempt = 1; ; attempt += 1) {
+        try {
+          return await this.ctx.agents.resume({
+            resumeSessionId: sessionId,
+            agentOptions,
+            ...setup2 === void 0 ? {} : { setup: setup2 }
+          });
+        } catch (error) {
+          if (attempt >= SESSION_OWNED_RETRY_ATTEMPTS || !isSessionOwnedError(error)) throw error;
+          this.log.warn(
+            "Session %s write lease held by another core (attempt %d/%d), retrying in %dms",
+            id,
+            attempt,
+            SESSION_OWNED_RETRY_ATTEMPTS,
+            SESSION_OWNED_RETRY_DELAY_MS
+          );
+          await sleep(SESSION_OWNED_RETRY_DELAY_MS);
+        }
+      }
+    };
     let exists = this.persistedIds.has(id);
     if (!exists) {
       try {
@@ -134111,7 +134152,7 @@ var ConversationManager = class {
     if (exists) {
       const stored = await this.storedPreset(id);
       const composed2 = await this.presetSetup(stored);
-      return this.ctx.agents.resume({ resumeSessionId: sessionId, agentOptions, ...composed2.setup === void 0 ? {} : { setup: composed2.setup } });
+      return resumeToleratingLease(composed2.setup);
     }
     const composed = await this.presetSetup(preset === void 0 ? this.config.taskDefaultPreset || void 0 : preset);
     const effort = id.startsWith("lark-v1-task-") ? this.config.taskReasoningEffort || "max" : current.reasoningEffort;
@@ -134162,11 +134203,7 @@ var ConversationManager = class {
         this.persistedIds.add(id);
         const stored = await this.storedPreset(id);
         const fallbackComposed = await this.presetSetup(stored);
-        return this.ctx.agents.resume({
-          resumeSessionId: sessionId,
-          agentOptions,
-          ...fallbackComposed.setup === void 0 ? {} : { setup: fallbackComposed.setup }
-        });
+        return resumeToleratingLease(fallbackComposed.setup);
       }
       throw error;
     }
@@ -134634,7 +134671,8 @@ var LarkHarnessBridge = class {
         await this.sendReply(message, reply, true);
       } catch (error) {
         this.log.error("Lark task thread message failed: %s", String(error));
-        await this.sendReply(message, { text: "\u5904\u7406\u4EFB\u52A1\u6D88\u606F\u65F6\u53D1\u751F\u9519\u8BEF\uFF0C\u8BF7\u7A0D\u540E\u91CD\u8BD5\u3002", images: [] }, true);
+        if (isSessionOwnedError(error)) await this.replySessionOwned(message, true);
+        else await this.sendReply(message, { text: "\u5904\u7406\u4EFB\u52A1\u6D88\u606F\u65F6\u53D1\u751F\u9519\u8BEF\uFF0C\u8BF7\u7A0D\u540E\u91CD\u8BD5\u3002", images: [] }, true);
       }
       return;
     }
@@ -134661,7 +134699,8 @@ ${error.stack}` : String(error);
           this.traceRouting(message, `task-error: ${detail}`);
           console.error("[dsh-lark-all] Lark task message failed:", error);
           this.log.error("Lark task message failed: %s", detail);
-          await this.sendReply(message, { text: `\u521B\u5EFA\u4EFB\u52A1\u4F1A\u8BDD\u65F6\u53D1\u751F\u9519\u8BEF: ${error instanceof Error ? error.message : String(error)}`, images: [] }, true);
+          if (isSessionOwnedError(error)) await this.replySessionOwned(message, true);
+          else await this.sendReply(message, { text: `\u521B\u5EFA\u4EFB\u52A1\u4F1A\u8BDD\u65F6\u53D1\u751F\u9519\u8BEF: ${error instanceof Error ? error.message : String(error)}`, images: [] }, true);
         }
         return;
       }
@@ -134676,8 +134715,16 @@ ${error.stack}` : String(error);
       this.traceRouting(message, `process-error: ${detail}`);
       console.error("[dsh-lark-all] Lark message processing failed:", error);
       this.log.error("Lark message processing failed: %s", detail);
-      await this.sendReply(message, { text: `\u5904\u7406\u6D88\u606F\u65F6\u53D1\u751F\u9519\u8BEF: ${error instanceof Error ? error.message : String(error)}`, images: [] });
+      if (isSessionOwnedError(error)) await this.replySessionOwned(message, false);
+      else await this.sendReply(message, { text: `\u5904\u7406\u6D88\u606F\u65F6\u53D1\u751F\u9519\u8BEF: ${error instanceof Error ? error.message : String(error)}`, images: [] });
     }
+  }
+  /** Tell the user their session is write-locked by another core (desktop app). */
+  async replySessionOwned(message, inTaskThread) {
+    await this.sendReply(message, {
+      text: "\u8BE5\u4F1A\u8BDD\u6B63\u5728\u684C\u9762\u7AEF\u6253\u5F00\uFF0C\u5199\u5165\u88AB\u5360\u7528\uFF08\u5DF2\u81EA\u52A8\u91CD\u8BD5\u4ECD\u672A\u6210\u529F\uFF09\u3002\u8BF7\u5728\u684C\u9762 App \u5207\u6362\u5230\u5176\u4ED6\u4F1A\u8BDD\u6216\u9000\u51FA\u684C\u9762 App\uFF0C\u7136\u540E\u91CD\u53D1\u8FD9\u6761\u6D88\u606F\u3002",
+      images: []
+    }, inTaskThread);
   }
   /**
    * Append one JSON line per inbound message with its thread context and the

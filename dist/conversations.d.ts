@@ -3,6 +3,8 @@ import type { NormalizedMessage } from '@larksuiteoapi/node-sdk';
 import type { LarkChannelPort } from './channel-port.js';
 import type { Config } from './config.js';
 import { type InboundMediaHandlers } from './inbound.js';
+/** True when the failure is the session write lease being held elsewhere. */
+export declare function isSessionOwnedError(error: unknown): boolean;
 /** Completed response from one Lark-triggered Harness turn. */
 export interface ConversationReply {
     text: string;

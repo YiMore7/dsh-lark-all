@@ -17,7 +17,7 @@ import {
   type TaskCardState,
 } from './card.js'
 import { inboundContent, type InboundMediaHandlers } from './inbound.js'
-import { sessionIdFor, taskAnchorFor, taskSessionIdFor, withTimeout } from './util.js'
+import { sessionIdFor, sleep, taskAnchorFor, taskSessionIdFor, withTimeout } from './util.js'
 
 function getSessionEventCount(session: Session): number {
   const s = session as any
@@ -41,6 +41,25 @@ function getSessionEvents(session: Session, start = 0): readonly SessionEvent[] 
     return s.log.slice(start)
   }
   return []
+}
+
+/**
+ * Session write-lease retry policy: another core (typically the desktop app
+ * with this session's chat open) holds the exclusive write lease, so resume
+ * fails with SessionAlreadyOwnedError. Retry briefly to pass transient
+ * in-turn holds; if the lease stays held, surface the error so the bridge
+ * can reply with actionable guidance.
+ */
+const SESSION_OWNED_RETRY_ATTEMPTS = 3
+const SESSION_OWNED_RETRY_DELAY_MS = 10_000
+
+/** True when the failure is the session write lease being held elsewhere. */
+export function isSessionOwnedError(error: unknown): boolean {
+  if (error instanceof Error) {
+    if (error.name === 'SessionAlreadyOwnedError') return true
+    if (error.message.includes('already owned by an active write handle')) return true
+  }
+  return String(error).includes('already owned by an active write handle')
 }
 
 /** Completed response from one Lark-triggered Harness turn. */
@@ -562,6 +581,28 @@ export class ConversationManager {
     const current = this.ctx.agentDefaultModel.currentSelection()
     const agentOptions = { provider: current.provider, model: current.model }
 
+    // Resume with tolerance for a write lease held by another core (e.g. the
+    // desktop app has this chat open): retry briefly, then rethrow so the
+    // bridge can tell the user how to release the lock.
+    const resumeToleratingLease = async (setup: AgentSetup | undefined): Promise<AgentHandle> => {
+      for (let attempt = 1; ; attempt += 1) {
+        try {
+          return await this.ctx.agents.resume({
+            resumeSessionId: sessionId,
+            agentOptions,
+            ...(setup === undefined ? {} : { setup }),
+          })
+        } catch (error) {
+          if (attempt >= SESSION_OWNED_RETRY_ATTEMPTS || !isSessionOwnedError(error)) throw error
+          this.log.warn(
+            'Session %s write lease held by another core (attempt %d/%d), retrying in %dms',
+            id, attempt, SESSION_OWNED_RETRY_ATTEMPTS, SESSION_OWNED_RETRY_DELAY_MS,
+          )
+          await sleep(SESSION_OWNED_RETRY_DELAY_MS)
+        }
+      }
+    }
+
     let exists = this.persistedIds.has(id)
     if (!exists) {
       try {
@@ -576,7 +617,7 @@ export class ConversationManager {
     if (exists) {
       const stored = await this.storedPreset(id)
       const composed = await this.presetSetup(stored)
-      return this.ctx.agents.resume({ resumeSessionId: sessionId, agentOptions, ...(composed.setup === undefined ? {} : { setup: composed.setup }) })
+      return resumeToleratingLease(composed.setup)
     }
 
     const composed = await this.presetSetup(preset === undefined ? this.config.taskDefaultPreset || undefined : preset)
@@ -638,11 +679,7 @@ export class ConversationManager {
         this.persistedIds.add(id)
         const stored = await this.storedPreset(id)
         const fallbackComposed = await this.presetSetup(stored)
-        return this.ctx.agents.resume({
-          resumeSessionId: sessionId,
-          agentOptions,
-          ...(fallbackComposed.setup === undefined ? {} : { setup: fallbackComposed.setup }),
-        })
+        return resumeToleratingLease(fallbackComposed.setup)
       }
       throw error
     }

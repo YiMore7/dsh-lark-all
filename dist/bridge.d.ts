@@ -22,6 +22,8 @@ export declare class LarkHarnessBridge {
     private trackMessage;
     private handleMessage;
     private handleMessageCore;
+    /** Tell the user their session is write-locked by another core (desktop app). */
+    private replySessionOwned;
     /**
      * Append one JSON line per inbound message with its thread context and the
      * routing decision to `<cwd>/.lark-routing.log`. Best-effort: used to

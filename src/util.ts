@@ -157,6 +157,11 @@ export function truncateText(text: string, maxChars: number, suffix = '\n\n[å›žå
   return points.slice(0, available).join('') + (suffixPoints.length <= maxChars ? suffix : '')
 }
 
+/** Resolve after `ms` milliseconds. */
+export function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms))
+}
+
 /** Promise timeout with a stable, caller-facing label. */
 export async function withTimeout<T>(task: Promise<T>, timeoutMs: number, label: string): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined

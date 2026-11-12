@@ -46,5 +46,7 @@ export declare function taskModeLabel(keyword: string): string;
 export declare function splitReportPages(text: string, limit: number): string[];
 /** Bound Unicode text to a character limit without splitting a code point. */
 export declare function truncateText(text: string, maxChars: number, suffix?: string): string;
+/** Resolve after `ms` milliseconds. */
+export declare function sleep(ms: number): Promise<void>;
 /** Promise timeout with a stable, caller-facing label. */
 export declare function withTimeout<T>(task: Promise<T>, timeoutMs: number, label: string): Promise<T>;

@@ -8,7 +8,7 @@ import { Client, createLarkChannel, Domain, type LarkChannelOptions, type Normal
 import axios from 'axios'
 import type { LarkChannelFactory, LarkChannelPort } from './channel-port.js'
 import type { Config } from './config.js'
-import { ConversationManager, type ConversationReply } from './conversations.js'
+import { ConversationManager, isSessionOwnedError, type ConversationReply } from './conversations.js'
 import { createDocxFromMarkdown, readDocxMarkdown } from './docx.js'
 import { uploadFileToDrive } from './drive.js'
 import { assertInsideAllowedDirs, buildOutboundMedia, extractMediaMarkers, isAbsoluteOrUrl, resolveOutboundMedia, type OutboundMedia } from './media.js'
@@ -256,7 +256,8 @@ export class LarkHarnessBridge {
         await this.sendReply(message, reply, true)
       } catch (error) {
         this.log.error('Lark task thread message failed: %s', String(error))
-        await this.sendReply(message, { text: '处理任务消息时发生错误，请稍后重试。', images: [] }, true)
+        if (isSessionOwnedError(error)) await this.replySessionOwned(message, true)
+        else await this.sendReply(message, { text: '处理任务消息时发生错误，请稍后重试。', images: [] }, true)
       }
       return
     }
@@ -279,7 +280,8 @@ export class LarkHarnessBridge {
           this.traceRouting(message, `task-error: ${detail}`)
           console.error('[dsh-lark-all] Lark task message failed:', error)
           this.log.error('Lark task message failed: %s', detail)
-          await this.sendReply(message, { text: `创建任务会话时发生错误: ${error instanceof Error ? error.message : String(error)}`, images: [] }, true)
+          if (isSessionOwnedError(error)) await this.replySessionOwned(message, true)
+          else await this.sendReply(message, { text: `创建任务会话时发生错误: ${error instanceof Error ? error.message : String(error)}`, images: [] }, true)
         }
         return
       }
@@ -294,8 +296,17 @@ export class LarkHarnessBridge {
       this.traceRouting(message, `process-error: ${detail}`)
       console.error('[dsh-lark-all] Lark message processing failed:', error)
       this.log.error('Lark message processing failed: %s', detail)
-      await this.sendReply(message, { text: `处理消息时发生错误: ${error instanceof Error ? error.message : String(error)}`, images: [] })
+      if (isSessionOwnedError(error)) await this.replySessionOwned(message, false)
+      else await this.sendReply(message, { text: `处理消息时发生错误: ${error instanceof Error ? error.message : String(error)}`, images: [] })
     }
+  }
+
+  /** Tell the user their session is write-locked by another core (desktop app). */
+  private async replySessionOwned(message: NormalizedMessage, inTaskThread: boolean): Promise<void> {
+    await this.sendReply(message, {
+      text: '该会话正在桌面端打开，写入被占用（已自动重试仍未成功）。请在桌面 App 切换到其他会话或退出桌面 App，然后重发这条消息。',
+      images: [],
+    }, inTaskThread)
   }
 
   /**
