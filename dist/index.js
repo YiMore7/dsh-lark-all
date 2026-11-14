@@ -134128,6 +134128,13 @@ var ConversationManager = class {
           });
         } catch (error) {
           if (attempt >= SESSION_OWNED_RETRY_ATTEMPTS || !isSessionOwnedError(error)) throw error;
+          console.error(
+            "[dsh-lark-all] Session %s write lease held by another core (attempt %d/%d), retrying in %dms",
+            id,
+            attempt,
+            SESSION_OWNED_RETRY_ATTEMPTS,
+            SESSION_OWNED_RETRY_DELAY_MS
+          );
           this.log.warn(
             "Session %s write lease held by another core (attempt %d/%d), retrying in %dms",
             id,
@@ -134548,6 +134555,7 @@ var LarkHarnessBridge = class {
     }
     if (this.stopping) return;
     const task = this.handleMessage(message).catch((error) => {
+      console.error("[dsh-lark-all] Lark message %s failed:", shortId2(message.messageId), error);
       this.log.error("Lark message %s failed: %s", shortId2(message.messageId), String(error));
     });
     const tracked = task.finally(() => this.inFlight.delete(tracked));

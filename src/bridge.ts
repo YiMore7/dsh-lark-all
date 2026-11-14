@@ -119,6 +119,10 @@ export class LarkHarnessBridge {
     }
     if (this.stopping) return
     const task = this.handleMessage(message).catch(error => {
+      // console.error mirrors to stderr (the only log line that reaches
+      // gateway.err); the cordis logger alone is not observable in the
+      // launchd deployment.
+      console.error('[dsh-lark-all] Lark message %s failed:', shortId(message.messageId), error)
       this.log.error('Lark message %s failed: %s', shortId(message.messageId), String(error))
     })
     const tracked = task.finally(() => this.inFlight.delete(tracked))

@@ -594,6 +594,8 @@ export class ConversationManager {
           })
         } catch (error) {
           if (attempt >= SESSION_OWNED_RETRY_ATTEMPTS || !isSessionOwnedError(error)) throw error
+          console.error('[dsh-lark-all] Session %s write lease held by another core (attempt %d/%d), retrying in %dms',
+            id, attempt, SESSION_OWNED_RETRY_ATTEMPTS, SESSION_OWNED_RETRY_DELAY_MS)
           this.log.warn(
             'Session %s write lease held by another core (attempt %d/%d), retrying in %dms',
             id, attempt, SESSION_OWNED_RETRY_ATTEMPTS, SESSION_OWNED_RETRY_DELAY_MS,
